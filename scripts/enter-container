@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+
+
+# --------------
+# Build image from clean start
+# --------------
+if [[ ! -v NEVER_REBUILD_DOCKER ]]; then
+  echo "Building docker image"
+  # See Dockerfile for an explanation of uid/gid.
+  gid="$(id -g)"
+  # Below is max($gid, 1000); on OS X, the user's group might be staff, with
+  # gid=20, which conflicts with ubuntu group dialout.
+  gid=$((gid > 1000 ? gid : 1000))
+  docker build -t dark --build-arg uid="$(id -u)" --build-arg gid="$gid" .
+
+  echo "Removing running containers"
+  c=$(docker ps --filter "name=dark-builder" -q)
+  if [[ -n "${c}" ]]; then
+    docker kill "${c}";
+  fi
+fi
+
+# --------------
+# Mounts
+# --------------
+
+MOUNTS="--mount type=bind,src=$PWD,dst=/home/dark/app"
+
+# Avoid docker syncing everything to the host, slowing compiles down by 5x
+MOUNTS+=" --mount type=volume,src=dark_build,dst=/home/dark/app/_build"
+MOUNTS+=" --mount type=volume,src=dark_esy,dst=/home/dark/app/_esy"
+MOUNTS+=" --mount type=volume,src=dark_dotesy,dst=/home/dark/.esy"
+MOUNTS+=" --mount type=volume,src=dark_node_modules,dst=/home/dark/app/node_modules"
+MOUNTS+=" --mount type=volume,src=dark_lib,dst=/home/dark/app/lib"
+MOUNTS+=" --mount type=volume,src=dark_stroller_target,dst=/home/dark/app/containers/stroller/target"
+MOUNTS+=" --mount type=volume,src=dark_queue_scheduler_target,dst=/home/dark/app/containers/queue-scheduler/target"
+MOUNTS+=" --mount type=volume,src=dark_rust_cargo,dst=/home/dark/.cargo"
+MOUNTS+=" --mount type=volume,src=dark_fsharp_build,dst=/home/dark/app/fsharp-backend/Build"
+
+if [[ -e "$HOME/.config/gcloud" ]]; then
+  MOUNTS="$MOUNTS --mount type=bind,src=$HOME/.config/gcloud,dst=/home/dark/.config/gcloud"
+fi
+# make sure this exists first, so it doesn't get created as a directory
+touch "$HOME/.dark_bash_history"
+MOUNTS="$MOUNTS --mount type=bind,src=$HOME/.dark_bash_history,dst=/home/dark/.bash_history"
+
+
+# --------------
+# environment
+# --------------
+
+ENV="dev"
+for i in "$@"
+do
+  case $i in
+    --prodclone)
+    ENV="dev_prodclone"
+    ;;
+  esac
+done
+
+ENV_FILE="config/$ENV"
+
+echo "Using env: $ENV_FILE"
+
+./scripts/support/create-dark-dev-network
+
+
+# --init here keeps orphaned processes (`<defunct>`, in ps) from
+# hanging around forever; see https://tech.fpcomplete.com/rust/pid1
+# (above the fold) for a description of the process 1 problem in
+# docker, and
+# https://docs.docker.com/engine/reference/run/#specify-an-init-process
+# for documentation of --init.
+# -p 5433:5432 to expose the postgres DB to outside the container
+# -p 2345:2345 to expose the cloud_sql_proxy to outside the container
+# -p 9000:9000 to expose the F# api server
+# -p 9001:9001 to expose the F# bwd server
+# -p 8000:8000 to expose the OCaml backend server
+# -cap-add & -secururity-opt to attach a gdb/strace to .net code
+docker run \
+             --init \
+             --rm \
+             -it \
+             --dns 8.8.8.8 \
+             --dns 8.8.4.4 \
+             --name dark-builder \
+             --hostname dark-dev \
+             --env-file "$ENV_FILE" \
+             --env HOST_PWD="$PWD" \
+             --env IN_DEV_CONTAINER=true \
+             $POLL_FREQ \
+             -v pgconf:/etc/postgresql \
+             -v pglogs:/var/log/postgresql \
+             -v pgdata:/var/lib/postgresql \
+             -v /var/run/docker.sock:/var/run/docker.sock \
+             -p 8000:8000 \
+             -p 9000:9000 \
+             -p 9001:9001 \
+             -p 5433:5432 \
+             -p 2345:2345 \
+             --security-opt seccomp=scripts/support/chrome-seccomp.json \
+             -w /home/dark/app \
+             --cap-add=ALL \
+             --security-opt seccomp=unconfined \
+			 --entrypoint "bash" \
+             $MOUNTS \
+             dark \
