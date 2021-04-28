@@ -298,7 +298,7 @@ module TaskOrValue =
         )
 
   let delay (f : unit -> TaskOrValue<'a>) : TaskOrValue<'a> =
-    Task(task { return! toTask (f ()) })
+    f ()
 
   // Create a new TaskOrValue that first runs 'vt' and then
   // continues with whatever TaskOrValue is produced by 'f'.
